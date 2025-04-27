@@ -1,6 +1,8 @@
 # .env file - for local testing ONLY
 # These values MUST be set as Fly.io secrets using flyctl secrets set
 # Example values:
-SECRET_TOKEN=your_super_secret_tunnel_token_change_this_seriously
-BACKEND_WS_URL=wss://uk.sshws.net:443/ # Or your preferred backend WS URL
-RECEIVE_TIMEOUT=25
+# fly.toml file for your application
+app = "app.py"
+
+[env]
+# The environment variables are handled as secrets in Fly.io
