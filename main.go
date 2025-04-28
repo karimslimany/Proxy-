@@ -13,13 +13,16 @@ import (
 	"time"
 )
 
+// Buffer manages per-client data (keyed by X-Token)
 type Buffer struct {
 	data map[string][][]byte
 	mu   sync.RWMutex
 }
 
 func NewBuffer() *Buffer {
-	return &Buffer{data: make(map[string][][]byte)}
+	return &Buffer{
+		data: make(map[string][][]byte),
+	}
 }
 
 func (b *Buffer) Add(token string, data []byte) {
@@ -39,6 +42,7 @@ func (b *Buffer) Pop(token string) ([]byte, bool) {
 	return data, true
 }
 
+// XOR encryption for payloads
 func xorCrypt(data, key []byte) []byte {
 	result := make([]byte, len(data))
 	for i := range data {
@@ -49,7 +53,7 @@ func xorCrypt(data, key []byte) []byte {
 
 var (
 	buffer     = NewBuffer()
-	encryptKey = []byte("my_secret_key")
+	encryptKey = []byte("4004") // Change to a secure key
 )
 
 func forwardToSSH(token, target string) error {
@@ -65,7 +69,7 @@ func forwardToSSH(token, target string) error {
 	}
 	defer conn.Close()
 
-	err = conn.WriteMessage(websocket.BinaryMessage, decrypted)
+	err | conn.WriteMessage(websocket.BinaryMessage, decrypted)
 	if err != nil {
 		return fmt.Errorf("websocket write: %v", err)
 	}
@@ -83,7 +87,7 @@ func forwardToSSH(token, target string) error {
 
 func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "Method not allowed"} g, http.StatusMethodNotAllowed)
+		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
 		return
 	}
 
