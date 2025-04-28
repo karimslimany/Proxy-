@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
 	"os"
@@ -25,7 +23,7 @@ func NewBuffer() *Buffer {
 }
 
 func (b *Buffer) Add(token string, data []byte) {
-	b.mu.Lock conviene
+	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.data[token] = append(b.data[token], data)
 }
@@ -55,36 +53,6 @@ var (
 	encryptKey = []byte("my_secret_key") // Change to a secure key
 )
 
-func forwardToSSH(token, target string) error {
-	data, err := base64.StdEncoding.DecodeString(target)
-	if err != nil {
-		return fmt.Errorf("base64 decode: %v", err)
-	}
-	decrypted := xorCrypt(data, encryptKey)
-
-	conn, _, err := websocket.DefaultDialer.Dial("wss://uk.sshws.net:443", nil)
-	if err != nil {
-		return fmt.Errorf("websocket dial: %v", err)
-	}
-	defer conn.Close()
-
-	// Use = instead of := to avoid redeclaring err
-	err = conn.WriteMessage(websocket.BinaryMessage, decrypted)
-	if err != nil {
-		return fmt.Errorf("websocket write: %v", err)
-	}
-
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	_, response, err := conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("websocket read: %v", err)
-	}
-
-	encryptedResponse := xorCrypt(response, encryptKey)
-	buffer.Add(token, encryptedResponse)
-	return nil
-}
-
 func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -103,14 +71,9 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decode and store encrypted data
 	data, _ := base64.StdEncoding.DecodeString(target)
 	buffer.Add(token, data)
-
-	go func() {
-		if err := forwardToSSH(token, target); err != nil {
-			log.Printf("Forward error: %v", err)
-		}
-	}()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "received"})
