@@ -1,4 +1,4 @@
-app = "main.go" # keep your app name here
+app = "my-proxy-app" # keep your app name here
 
 primary_region = "cdg" # or a region closer to your users
 
