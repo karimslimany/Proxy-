@@ -1,31 +1,23 @@
-app = "my-proxy-app" # keep your app name here
-
-primary_region = "cdg" # or a region closer to your users
+app = "my-proxy-app"
+primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  PORT = "8080" # make sure your app listens on this port
+  PORT = "8080"
 
-[[services]]
+[http_service]
   internal_port = 8080
-  protocol = "tcp"
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
 
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
-
-  [[services.ports]]
-    port = 80
-    handlers = ["http"]
-
-  [[services.tcp_checks]]
-    interval = "15s"
+[checks]
+  [checks.http]
+    grace_period = "5s"
+    interval = "10s"
+    method = "GET"
+    path = "/health"
     timeout = "2s"
-    grace_period = "10s"
-
-  [services.concurrency]
-    type = "requests"
-    soft_limit = 100
-    hard_limit = 150
