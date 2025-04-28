@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -53,7 +52,7 @@ func xorCrypt(data, key []byte) []byte {
 
 var (
 	buffer     = NewBuffer()
-	encryptKey = []byte("4004") // Change to a secure key
+	encryptKey = []byte("my_secret_key") // Change to a secure key
 )
 
 func forwardToSSH(token, target string) error {
@@ -69,7 +68,7 @@ func forwardToSSH(token, target string) error {
 	}
 	defer conn.Close()
 
-	err | conn.WriteMessage(websocket.BinaryMessage, decrypted)
+	err := conn.WriteMessage(websocket.BinaryMessage, decrypted)
 	if err != nil {
 		return fmt.Errorf("websocket write: %v", err)
 	}
