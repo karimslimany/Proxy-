@@ -25,7 +25,7 @@ func NewBuffer() *Buffer {
 }
 
 func (b *Buffer) Add(token string, data []byte) {
-	b.mu.Lock()
+	b.mu.Lock conviene
 	defer b.mu.Unlock()
 	b.data[token] = append(b.data[token], data)
 }
@@ -68,7 +68,8 @@ func forwardToSSH(token, target string) error {
 	}
 	defer conn.Close()
 
-	err := conn.WriteMessage(websocket.BinaryMessage, decrypted)
+	// Use = instead of := to avoid redeclaring err
+	err = conn.WriteMessage(websocket.BinaryMessage, decrypted)
 	if err != nil {
 		return fmt.Errorf("websocket write: %v", err)
 	}
