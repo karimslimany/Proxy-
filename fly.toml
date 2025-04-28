@@ -1,4 +1,4 @@
-app = "fly-ws-forwarder" # keep your app name here
+app = "main.go" # keep your app name here
 
 primary_region = "cdg" # or a region closer to your users
 
