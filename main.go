@@ -3,6 +3,10 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -10,52 +14,111 @@ import (
 	"time"
 )
 
-// Buffer manages per-client data (keyed by X-Token)
+// Buffer manages per-client data with expiration
 type Buffer struct {
-	data map[string][][]byte
+	data map[string][]message
 	mu   sync.RWMutex
+}
+
+type message struct {
+	data      []byte
+	timestamp time.Time
 }
 
 func NewBuffer() *Buffer {
 	return &Buffer{
-		data: make(map[string][][]byte),
+		data: make(map[string][]message),
 	}
 }
 
 func (b *Buffer) Add(token string, data []byte) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.data[token] = append(b.data[token], data)
+	b.data[token] = append(b.data[token], message{data: data, timestamp: time.Now()})
+	// Keep buffer small (max 100 messages per token)
+	if len(b.data[token]) > 100 {
+		b.data[token] = b.data[token][1:]
+	}
 }
 
 func (b *Buffer) Pop(token string) ([]byte, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// Cleanup expired messages
+	now := time.Now()
+	valid := []message{}
+	for _, msg := range b.data[token] {
+		if now.Sub(msg.timestamp) < 30*time.Second {
+			valid = append(valid, msg)
+		}
+	}
+	b.data[token] = valid
+
 	if len(b.data[token]) == 0 {
 		return nil, false
 	}
-	data := b.data[token][0]
+	data := b.data[token][0].data
 	b.data[token] = b.data[token][1:]
 	return data, true
 }
 
-// XOR encryption for payloads
-func xorCrypt(data, key []byte) []byte {
-	result := make([]byte, len(data))
-	for i := range data {
-		result[i] = data[i] ^ key[i%len(key)]
-	}
-	return result
-}
-
+// AES Encryption
 var (
 	buffer     = NewBuffer()
-	encryptKey = []byte("my_secret_key") // Change to a secure key
+	encryptKey = []byte("1234567890abcdef") // 16 bytes for AES-128
+	authSecret = "super_secret_auth"        // Simple shared auth secret
 )
 
+// AES Encrypt
+func encrypt(data []byte) ([]byte, error) {
+	block, err := aes.NewCipher(encryptKey)
+	if err != nil {
+		return nil, err
+	}
+
+	ciphertext := make([]byte, aes.BlockSize+len(data))
+	iv := ciphertext[:aes.BlockSize]
+
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return nil, err
+	}
+
+	stream := cipher.NewCTR(block, iv)
+	stream.XORKeyStream(ciphertext[aes.BlockSize:], data)
+
+	return ciphertext, nil
+}
+
+// AES Decrypt
+func decrypt(ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(encryptKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ciphertext) < aes.BlockSize {
+		return nil, err
+	}
+
+	iv := ciphertext[:aes.BlockSize]
+	data := ciphertext[aes.BlockSize:]
+
+	stream := cipher.NewCTR(block, iv)
+	stream.XORKeyStream(data, data)
+
+	return data, nil
+}
+
+// Handlers
 func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": "Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if r.Header.Get("X-Auth") != authSecret {
+		http.Error(w, `{"error": "Unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
 
@@ -66,13 +129,18 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := base64.StdEncoding.DecodeString(target); err != nil {
+	encryptedData, err := base64.StdEncoding.DecodeString(target)
+	if err != nil {
 		http.Error(w, `{"error": "Invalid base64"}`, http.StatusBadRequest)
 		return
 	}
 
-	// Decode and store encrypted data
-	data, _ := base64.StdEncoding.DecodeString(target)
+	data, err := decrypt(encryptedData)
+	if err != nil {
+		http.Error(w, `{"error": "Decryption failed"}`, http.StatusBadRequest)
+		return
+	}
+
 	buffer.Add(token, data)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -85,22 +153,28 @@ func receiveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Header.Get("X-Auth") != authSecret {
+		http.Error(w, `{"error": "Unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+
 	token := r.Header.Get("X-Token")
 	if token == "" {
 		http.Error(w, `{"error": "Missing token"}`, http.StatusBadRequest)
 		return
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 5; i++ {
 		if data, ok := buffer.Pop(token); ok {
+			encryptedData, _ := encrypt(data)
 			resp := map[string]string{
-				"data": base64.StdEncoding.EncodeToString(data),
+				"data": base64.StdEncoding.EncodeToString(encryptedData),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		time.Sleep(time.Second)
+		time.Sleep(1 * time.Second)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
