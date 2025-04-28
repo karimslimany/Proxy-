@@ -1,20 +1,32 @@
-# Build stage
+# Start from the official Go base image
 FROM golang:1.21-alpine AS builder
+
+# Set environment variables
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+
+# Set working directory inside container
 WORKDIR /app
+
+# Copy go.mod and go.sum first for dependency caching
 COPY go.mod go.sum ./
 RUN go mod download
+
+# Now copy the rest of the source code
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server
 
-# Runtime stage
-FROM alpine:3.18
-WORKDIR /app
-COPY --from=builder /app/server /app/server
-RUN apk add --no-cache ca-certificates tzdata
+# Build the Go app
+RUN go build -o server .
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/healthz || exit 1
+# Start a minimal final container
+FROM alpine:latest
 
+WORKDIR /root/
+
+# Copy the compiled binary from builder
+COPY --from=builder /app/server .
+
+# Expose the port the app runs on
 EXPOSE 8080
-CMD ["/app/server"]
+
+# Command to run the app
+ENTRYPOINT ["./server"]
