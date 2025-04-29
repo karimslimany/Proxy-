@@ -7,7 +7,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o proxy .
+RUN python build -o proxy .
 
 EXPOSE 8080
 
