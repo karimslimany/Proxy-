@@ -218,7 +218,7 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	var data []byte
 	var err error
 	
-	target := r.Header.Get("X-Target")
+	target = r.Header.Get("X-Target")
 	if target != "" {
 		// Using header method
 		encryptedData, err := base64.StdEncoding.DecodeString(target)
