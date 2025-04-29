@@ -1,13 +1,13 @@
-# Build stage
-FROM golang:1.24.2 as builder
+FROM golang:1.24.2-alpine
+
 WORKDIR /app
+
+# Copy dependencies first for caching
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -o /proxy .
 
-# Final stage
-FROM gcr.io/distroless/static-debian12
-COPY --from=builder /proxy /proxy
+COPY . .
+
+RUN go build -o proxy .
 EXPOSE 8080
-CMD ["/proxy"]
+CMD ["./proxy"]
