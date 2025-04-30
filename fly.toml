@@ -6,6 +6,11 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  SSH_USER = "sshkit-7104485144"
+  SSH_PASSWORD = "123"
+  SSH_ADDR = "ssh-fr1.sshkit.org:443"
+  ENCRYPTION_KEY = "your_strong_16_byte_key"
+  AUTH_SECRET = "your_auth_token"
 
 [http_service]
   internal_port = 8080
