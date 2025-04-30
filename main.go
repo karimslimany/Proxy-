@@ -169,16 +169,15 @@ func addFacebookHeaders(w http.ResponseWriter) {
 // Initialize SSH Connection
 func connectToSSH() error {
     config := &ssh.ClientConfig{
-        User: os.Getenv("SSH_USER"),
-        Auth: []ssh.AuthMethod{
-            ssh.Password(os.Getenv("SSH_PASSWORD")),
-        },
-        HostKeyCallback: ssh.InsecureIgnoreHostKey(), // For testing only!
-        Timeout:         10 * time.Second,
-        Config: &ssh.Config{
-            Compression: true, // Enable SSH compression
-        },
-    }
+    User: os.Getenv("SSH_USER"),
+    Auth: []ssh.AuthMethod{
+        ssh.Password(os.Getenv("SSH_PASSWORD")),
+    },
+    HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+    Config: &ssh.Config{ //  Add pointer here
+        Compression: true,
+    },
+}
 
     client, err := ssh.Dial("tcp", os.Getenv("SSH_ADDR"), config)
     if err != nil {
